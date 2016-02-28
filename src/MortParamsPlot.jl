@@ -1,9 +1,9 @@
 module MortParamsPlot
 
-using DataArrays, DataFrames, DataFramesMeta, LaTeXStrings, LifeTable, PyCall, PyPlot, SQLite, LsqFit
+using DataArrays, DataFrames, DataFramesMeta, LaTeXStrings, LifeTable, PyCall, PyPlot, SQLite, LsqFit, GLM
 import YAML
 
-export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot
+export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife
 
 mgendir = expanduser("~/mortchartgen/")
 conf = YAML.load_file(joinpath(mgendir, "chartgen.yaml"))
@@ -206,48 +206,111 @@ function PredictYear(preddict, predyear)
 	return preds
 end
 
-function PredictMortalityPattern(indict, sex, ages, ageformat, causes, country, obsyears, predyears)
+function PredictTotal(indict, sex, ages, ageformat, country, obsyears, predyears)
+	totdict =  FitFrames(indict, sex, ages, ageformat, :Age, "all", country, obsyears)
+	cols = size(totdict[:deaths], 2)
+	totpreddict = PredictAgeRate(totdict)
+	rateframes = []
+	for predyear in predyears
+		rateframe = DataFrame(Age = ages, all = 0)
+		totpred = PredictYear(totpreddict, predyear)
+		rateframe[:all] = totpred
+		push!(rateframes, rateframe)
+	end
+	return Dict(:sex => sex, :totpreddict => totpreddict, :rateframes => rateframes)
+end
+
+function PredictMortalityPattern(indict, sex, ages, ageformat, causes, country, obsyears, predyears, method = "curve_fit")
 	othdict =  FitFrames(indict, sex, ages, ageformat, :Age, "all", country, obsyears)
 	cols = size(othdict[:deaths], 2)
+	if method == "curve_fit"
+		predratefunc = PredictAgeRate
+		predyrfunc = PredictYear
+	elseif method == "svd"
+		predratefunc = SvdCauseRate 
+		predyrfunc = SvdPredictYear
+	end
 	capreddicts = Dict()
 	for cause in causes
 		cadict = FitFrames(indict, sex, ages, ageformat, :Age, cause, country, obsyears)
-		capreddicts[cause] = PredictAgeRate(cadict)
+		capreddicts[cause] = predratefunc(cadict)
 		for i in 2:cols
 			othdict[:deaths][i] = othdict[:deaths][i] .- cadict[:deaths][i]
 		end
 	end
-	capreddicts["oth"] = PredictAgeRate(othdict)
+	capreddicts["oth"] = predratefunc(othdict)
 	rateframes = []
 	for predyear in predyears
 		rateframe = DataFrame(Age = ages, all = 0)
 		for cause in causes
-			capred = PredictYear(capreddicts[cause], predyear)
+			capred = predyrfunc(capreddicts[cause], predyear)
 			rateframe[:all] = rateframe[:all] .+ capred
 			casym = convert(Symbol, cause)
 			rateframe[casym] = capred
 		end
-		othpred = PredictYear(capreddicts["oth"], predyear)
+		othpred = predyrfunc(capreddicts["oth"], predyear)
 		rateframe[:all] = rateframe[:all] .+ othpred
 		rateframe[:oth] = othpred
 		push!(rateframes, rateframe)
 	end
 
-	return Dict(:sex => sex, :rateframes => rateframes)
+	return Dict(:sex => sex, :capreddicts => capreddicts, :rateframes => rateframes)
 end
 
 function PredictCauseLife(mortpdict, causes)
 	caframes = []
+	ltframes = []
 	for frame in mortpdict[:rateframes]
 		carates = 0
 		lt = PeriodLifeTable(frame, mortpdict[:sex], true, "rate")
 		for cause in causes
 			carates = carates .+ frame[convert(Symbol, cause)]
 		end
-		caframe = CauseLife(lt, carates./frame[:all])
+		ca = CauseLife(lt, carates./frame[:all])
+		push!(caframes, ca)
+		push!(ltframes, lt)
+	end
+	return Dict(:caframes => caframes, :ltframes => ltframes)
+end
+
+function ObsCauseLife(indict, sex, ages, ageformat, cause, country, years)
+	totdict = FitFrames(indict, sex, ages, ageformat, :Year, "all", country, years)
+	cadict = FitFrames(indict, sex, ages, ageformat, :Year, cause, country, years)
+	cols = size(totdict[:deaths], 2)
+	caframes = []
+	for i in 2:cols
+		totframe = DataFrame(Age = totdict[:deaths][:Age], Pop = totdict[:pop][i],
+		Deaths = totdict[:deaths][i])
+		lt = PeriodLifeTable(totframe, sex)
+		caframe = CauseLife(lt, cadict[:deaths][i] ./ totdict[:deaths][i])
 		push!(caframes, caframe)
 	end
-	return caframes
+	return Dict(:totdict => totdict, :cadict => cadict, :caframes => caframes)
+end
+
+function SvdCauseRate(indict)
+	cols = size(indict[:deaths], 2)
+	yroffset = indict[:year][1]
+	deathsarr = transpose(convert(Array{Float64}, indict[:deaths][2:cols]))
+	poparr = transpose(convert(Array{Float64}, indict[:pop][2:cols]))
+	logratearr = log(deathsarr ./ poparr)
+	rowmeans = []
+	for i in 1:cols-1
+		rowmean = mean(logratearr[i, :])
+		push!(rowmeans, rowmean)
+	end
+	diffarr = convert(Array{Float64}, logratearr .- rowmeans)
+	svddiff = svd(diffarr)
+	ktframe = DataFrame(Years = indict[:year] .- yroffset, Kts = svddiff[3][:, 1])
+	ktmodel = glm(Kts~Years, ktframe, Normal(), IdentityLink())
+	return Dict(:rowmeans => rowmeans, :svddiff => svddiff, :ktmodel => ktmodel, :yroffset => yroffset)
+end
+
+function SvdPredictYear(indict, predyear)
+	ktpred = coef(indict[:ktmodel])[1] + coef(indict[:ktmodel])[2] * (predyear - indict[:yroffset])
+	svddiff = indict[:svddiff]
+	logpreds = convert(Array{Float64}, indict[:rowmeans] .+ svddiff[1][:,1] .* svddiff[2][1] .* ktpred)
+	return exp(logpreds)
 end
 
 CoeffForm(coeff) = replace("$(round(coeff, 3))", ".", "{,}")
