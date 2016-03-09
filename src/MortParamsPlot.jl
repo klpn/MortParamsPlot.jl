@@ -73,6 +73,14 @@ function FitFrames(indict, sex, ages, ageformat, dimension, cause, country, year
 		convert(Vector{Symbol}, map((x)->"n$x", col))
 	end
 
+	function LeadingZero(age)
+		if age < 10
+			return "0$age"
+		else
+			return "$age"
+		end
+	end
+
 	if dimension == :Cause 
 		deahts = @ix(deaths, findin(:Cause, cause))
 		deaths = @ix(deaths , (:Country .== country) & (:Year .== year),
@@ -107,8 +115,8 @@ function FitFrames(indict, sex, ages, ageformat, dimension, cause, country, year
 		deaths = @ix(deaths, (:Country .== country) & (:Cause .== cause),
 		[:Year, :Deaths, :Age])
 		pop = @ix(pop, :Country .== country, [:Year, :Pop, :Age])
-		deaths[:Age] = DimSymb(deaths[:Age])
-		pop[:Age] = DimSymb(pop[:Age])
+		deaths[:Age] = DimSymb(map(LeadingZero, (deaths[:Age])))
+		pop[:Age] = DimSymb(map(LeadingZero, (pop[:Age])))
 		deaths = unstack(deaths, :Year, :Age, :Deaths)
 		pop = unstack(pop, :Year, :Age, :Pop)
 	end
