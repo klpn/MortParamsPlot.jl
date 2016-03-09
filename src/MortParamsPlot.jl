@@ -3,7 +3,7 @@ module MortParamsPlot
 using DataArrays, DataFrames, DataFramesMeta, LaTeXStrings, LifeTable, PyCall, PyPlot, SQLite, LsqFit, GLM
 import YAML
 
-export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife
+export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife, ZeroAdd, CoeffForm
 
 mgendir = expanduser("~/mortchartgen/")
 conf = YAML.load_file(joinpath(mgendir, "chartgen.yaml"))
@@ -80,7 +80,7 @@ function FitFrames(indict, sex, ages, ageformat, dimension, cause, country, year
 		pop = @ix(pop, (:Country .== country) & (:Year .== year), 
 		[:Pop, :Age])
 		deaths[:Cause] = DimSymb(deaths[:Cause])
-		deaths = unstack(deaths, :Cause, :Deaths)
+		deaths = unstack(deaths, :Age, :Cause, :Deaths)
 	elseif dimension == :Country
 		deaths = @ix(deaths, findin(:Country, country))
 		pop = @ix(pop, findin(:Country, country))
@@ -89,8 +89,8 @@ function FitFrames(indict, sex, ages, ageformat, dimension, cause, country, year
 		pop =  @ix(pop, :Year .== year, [:Country, :Pop, :Age])
 		deaths[:Country] = DimSymb(deaths[:Country])
 		pop[:Country] = DimSymb(pop[:Country])
-		deaths = unstack(deaths, :Country, :Deaths)
-		pop = unstack(pop, :Country, :Pop)
+		deaths = unstack(deaths, :Age, :Country, :Deaths)
+		pop = unstack(pop, :Age, :Country, :Pop)
 	elseif dimension == :Year
 		deaths = @ix(deaths, findin(:Year, year))
 		pop = @ix(pop, findin(:Year, year))
@@ -99,8 +99,8 @@ function FitFrames(indict, sex, ages, ageformat, dimension, cause, country, year
 		pop = @ix(pop, :Country .== country, [:Year, :Pop, :Age])
 		deaths[:Year] = DimSymb(deaths[:Year])
 		pop[:Year] = DimSymb(pop[:Year])
-		deaths = unstack(deaths, :Year, :Deaths)
-		pop = unstack(pop, :Year, :Pop)
+		deaths = unstack(deaths, :Age, :Year, :Deaths)
+		pop = unstack(pop, :Age, :Year, :Pop)
 	elseif dimension == :Age
 		deaths = @ix(deaths, findin(:Year, year))
 		pop = @ix(pop, findin(:Year, year))
@@ -288,10 +288,18 @@ function ObsCauseLife(indict, sex, ages, ageformat, cause, country, years)
 	return Dict(:totdict => totdict, :cadict => cadict, :caframes => caframes)
 end
 
+function ZeroAdd(x, c = 0.5)
+	if x == 0
+		return c
+	else
+		return x
+	end
+end
+
 function SvdCauseRate(indict)
 	cols = size(indict[:deaths], 2)
 	yroffset = indict[:year][1]
-	deathsarr = transpose(convert(Array{Float64}, indict[:deaths][2:cols]))
+	deathsarr = map(ZeroAdd, transpose(convert(Array{Float64}, indict[:deaths][2:cols])))
 	poparr = transpose(convert(Array{Float64}, indict[:pop][2:cols]))
 	logratearr = log(deathsarr ./ poparr)
 	rowmeans = []
@@ -301,15 +309,25 @@ function SvdCauseRate(indict)
 	end
 	diffarr = convert(Array{Float64}, logratearr .- rowmeans)
 	svddiff = svd(diffarr)
+	svsq = svddiff[2].^2
+	svfit = svsq ./ sum(svsq)
 	ktframe = DataFrame(Years = indict[:year] .- yroffset, Kts = svddiff[3][:, 1])
 	ktmodel = glm(Kts~Years, ktframe, Normal(), IdentityLink())
-	return Dict(:rowmeans => rowmeans, :svddiff => svddiff, :ktmodel => ktmodel, :yroffset => yroffset)
+	return Dict(:rowmeans => rowmeans, :logratearr => logratearr, :svddiff => svddiff, :svfit => svfit, :ktmodel => ktmodel, :yroffset => yroffset)
 end
 
-function SvdPredictYear(indict, predyear)
-	ktpred = coef(indict[:ktmodel])[1] + coef(indict[:ktmodel])[2] * (predyear - indict[:yroffset])
+function SvdPredictYear(indict, predyear, method = "glm")
 	svddiff = indict[:svddiff]
-	logpreds = convert(Array{Float64}, indict[:rowmeans] .+ svddiff[1][:,1] .* svddiff[2][1] .* ktpred)
+	lastobsyear = size(svddiff[3], 1) + indict[:yroffset]
+	if method == "glm"
+		ktpred = coef(indict[:ktmodel])[1] + 
+		coef(indict[:ktmodel])[2] * (predyear - indict[:yroffset])
+	elseif method == "arima"
+		ktpred = svddiff[3][end, 1] + (predyear - lastobsyear) * 
+		((svddiff[3][end, 1] - svddiff[3][1, 1])/size(svddiff[3], 1))
+	end
+	bxpred = svddiff[1][:,1]
+	logpreds = convert(Array{Float64}, indict[:rowmeans] .+ bxpred .* svddiff[2][1] .* ktpred)
 	return exp(logpreds)
 end
 
