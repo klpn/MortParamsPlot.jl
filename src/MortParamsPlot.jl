@@ -3,7 +3,7 @@ module MortParamsPlot
 using DataArrays, DataFrames, DataFramesMeta, LaTeXStrings, LifeTable, PyCall, PyPlot, SQLite, LsqFit, GLM
 import YAML
 
-export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife, ZeroAdd, CoeffForm, PredictYear, SvdPredictYear
+export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife, ZeroAdd, CoeffForm, PredictYear, SvdPredictYear, ParamsYearTrend
 
 mgendir = expanduser("~/mortchartgen/")
 conf = YAML.load_file(joinpath(mgendir, "chartgen.yaml"))
@@ -184,8 +184,35 @@ function FitParams(indict::Dict, func, functype)
 		msf = MortSurvFit(lt, deaths[i], func, functype)
 		push!(msfs, msf)
 	end
-	return [:indict => indict, :lts => lts, :msfs => msfs,
-	:parafit => MortSurvParamsFit(msfs), :func => func, :functype => functype]
+	return Dict(:indict => indict, :lts => lts, :msfs => msfs,
+	:parafit => MortSurvParamsFit(msfs), :func => func, :functype => functype)
+end
+
+function ParamsYearTrend(indict)
+	params = indict[:parafit]["trans_params"][:X]
+	data = DataFrame(X = 1:size(params)[1], Y = params)
+	parmodel = glm(Y~X, data, Normal(), IdentityLink())
+	yroffset = indict[:indict][:year][1]
+	return  Dict(:indict => indict, :parmodel => parmodel, :yroffset => yroffset)
+end
+
+function ParamsFramesTrend(indict, func)
+	fitparams = FitParams(indict, func, "rate")
+	return ParamsYearTrend(fitparams)
+end
+
+function ParamsPredictYear(indict, predyear, ages)
+	parpred_ind = coef(indict[:parmodel])[1] + coef(indict[:parmodel])[2] * (predyear - indict[:yroffset])
+	parcoef = coef(indict[:indict][:parafit]["fit"])
+	parpred_dep = parcoef[1] + parcoef[2] * parpred_ind
+	func = indict[:indict][:func]
+	if func == "gompertz"
+		agecol = ages
+	elseif func == "weibull"
+		agecol = log(ages)
+	end
+	logpreds = parpred_dep + parpred_ind * agecol
+	return exp(logpreds)
 end
 
 function PredictAgeRate(indict)
@@ -230,18 +257,27 @@ function PredictTotal(indict, sex, ages, ageformat, country, obsyears, predyears
 end
 
 function PredictMortalityPattern(indict, sex, ages, ageformat, causes, country, obsyears, predyears, method = "curve_fit")
-	othdict =  FitFrames(indict, sex, ages, ageformat, :Age, "all", country, obsyears)
-	cols = size(othdict[:deaths], 2)
 	if method == "curve_fit"
 		predratefunc = PredictAgeRate
 		predyrfunc = PredictYear
+		dim = :Age
 	elseif method == "svd"
 		predratefunc = SvdCauseRate 
 		predyrfunc = SvdPredictYear
+		dim = :Age
+	elseif (method == "gompertz" || method == "weibull")
+		predrate(indict) = ParamsFramesTrend(indict, method)
+		predyr(indict, predyear) = ParamsPredictYear(indict, predyear, ages)
+		predratefunc = predrate
+		predyrfunc = predyr
+		dim = :Year
 	end
+
+	othdict =  FitFrames(indict, sex, ages, ageformat, dim, "all", country, obsyears)
+	cols = size(othdict[:deaths], 2)
 	capreddicts = Dict()
 	for cause in causes
-		cadict = FitFrames(indict, sex, ages, ageformat, :Age, cause, country, obsyears)
+		cadict = FitFrames(indict, sex, ages, ageformat, dim, cause, country, obsyears)
 		capreddicts[cause] = predratefunc(cadict)
 		for i in 2:cols
 			othdict[:deaths][i] = othdict[:deaths][i] .- cadict[:deaths][i]
