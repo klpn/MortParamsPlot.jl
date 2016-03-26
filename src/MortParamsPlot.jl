@@ -3,7 +3,7 @@ module MortParamsPlot
 using DataArrays, DataFrames, DataFramesMeta, LaTeXStrings, LifeTable, PyCall, PyPlot, SQLite, LsqFit, GLM
 import YAML
 
-export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife, ZeroAdd, CoeffForm
+export LongTable, FitFrames, FitParams, FitParamsNonnorm, ParamsPlot, ObspredPlot, PredictMortalityPattern, PredictCauseLife, ObsCauseLife, ZeroAdd, CoeffForm, PredictYear, SvdPredictYear
 
 mgendir = expanduser("~/mortchartgen/")
 conf = YAML.load_file(joinpath(mgendir, "chartgen.yaml"))
@@ -192,18 +192,19 @@ function PredictAgeRate(indict)
 	deaths = indict[:deaths]
 	pop = indict[:pop]
 	cols = size(deaths, 2)
+	deathsarr = map(ZeroAdd, convert(Array{Float64}, deaths[2:cols]))
+	poparr = convert(Array{Float64}, pop[2:cols])
+	ratearr = deathsarr ./ poparr
 	model(x, p) = p[1] * exp(p[2].*x)
 
 	pars = []
-	obsrates = []
 	for i in 2:cols
 		year = convert(Array{Int}, deaths[1] - deaths[1][1]) 
-		rate = convert(Array{Float64}, deaths[i]./pop[i])
-		push!(obsrates, rate)
+		rate = ratearr[:, i-1] 
 		fit = curve_fit(model, year, rate, [rate[1], log(rate[2])-log(rate[1])])
 		push!(pars, fit.param)
 	end
-	return Dict(:model => model, :pars => pars, :obsrates => obsrates, :yroffset => deaths[1][1]) 
+	return Dict(:model => model, :pars => pars, :ratearr => ratearr, :yroffset => deaths[1][1]) 
 end
 
 function PredictYear(preddict, predyear)
@@ -265,7 +266,7 @@ function PredictMortalityPattern(indict, sex, ages, ageformat, causes, country, 
 	return Dict(:sex => sex, :capreddicts => capreddicts, :rateframes => rateframes)
 end
 
-function PredictCauseLife(mortpdict, causes)
+function PredictCauseLife(mortpdict, causes, combcaname)
 	caframes = []
 	ltframes = []
 	for frame in mortpdict[:rateframes]
@@ -278,7 +279,7 @@ function PredictCauseLife(mortpdict, causes)
 		push!(caframes, ca)
 		push!(ltframes, lt)
 	end
-	return Dict(:caframes => caframes, :ltframes => ltframes)
+	return Dict(:caframes => caframes, :ltframes => ltframes, :combcaname => combcaname)
 end
 
 function ObsCauseLife(indict, sex, ages, ageformat, cause, country, years)
@@ -354,7 +355,7 @@ function ParamsPlot(fitdict, plot = "params")
 	cause = fitdict[:indict][:cause]
 	country = fitdict[:indict][:country]
 	sex = fitdict[:indict][:sex]
-	dimension = fitdict[:indict][:sex]
+	dimension = fitdict[:indict][:dimension]
 	causealias = conf["causes"][cause]["alias"] 
 	sexalias = conf["sexes"][sex]["alias"] 
 	countryalias = conf["countries"][country]["alias"] 
